@@ -122,7 +122,7 @@ Generating User Static Credential
 
 Generating STS Credential
 
-    $ vault write <path>/creds/example-role ttl=<time in seconds>
+    $ vault write <path>/sts/example-role ttl=<time in seconds>
 ___
 ## Unit Test
 To run the unit tests for this project run below command
