@@ -2,11 +2,12 @@ package minio
 
 import (
     "context"
-    "sync"
+    "errors"
     "strings"
+    "sync"
 
-    "github.com/hashicorp/vault/sdk/logical"
     "github.com/hashicorp/vault/sdk/framework"
+    "github.com/hashicorp/vault/sdk/logical"
 
     "github.com/minio/madmin-go/v3"
 )
@@ -16,9 +17,6 @@ type minioBackend struct {
 
     client *madmin.AdminClient
 
-    // We're going to have to be able to rotate the client
-    // if the mount configured credentials change, use
-    // this to protect it
     clientMutex sync.RWMutex
 }
 
@@ -26,7 +24,7 @@ type minioBackend struct {
 func Factory(ctx context.Context, c *logical.BackendConfig) (logical.Backend, error) {
     b := Backend()
     if err := b.Setup(ctx, c); err != nil {
-        return nil, err
+    return nil, err
     }
 
     b.Logger().Info("Plugin successfully initialized")
@@ -42,9 +40,9 @@ func Backend() *minioBackend {
     Help: strings.TrimSpace(minioHelp),
     PathsSpecial: &logical.Paths{
         SealWrapStorage: []string{
-            "config",
+            configStoragePath,
             "roles/*",
-            "users",
+            userStoragePath,
         },
     },
     Paths: []*framework.Path{
@@ -59,7 +57,8 @@ func Backend() *minioBackend {
         b.pathRolesCRUD(),
 
         // path_keys.go
-        // ^keys/<role>
+        // ^creds/<role>
+        // ^sts/<role>
         b.pathKeysRead(),
     },
     }
@@ -69,6 +68,65 @@ func Backend() *minioBackend {
     return &b
 }
 
+// Convenience function to get a new madmin client
+func (b *minioBackend) getMadminClient(ctx context.Context, s logical.Storage) (*madmin.AdminClient, error) {
+
+    b.Logger().Debug("getMadminClient, getting clientMutext.RLock")
+    b.clientMutex.Lock()
+    defer b.clientMutex.Unlock()
+
+    if b.client != nil {
+        b.Logger().Debug("Already have client, returning")
+        return b.client, nil
+    }
+
+    // Don't have client, look up configuration and gin up new client
+    b.Logger().Info("getMadminClient, need new client and looking up config")
+
+    c, err := b.GetConfig(ctx, s)
+    if err != nil {
+        b.Logger().Error("Error fetching config in getMadminClient", "error", err)
+        return nil, err
+    }
+
+    if c.Endpoint == "" {
+        err = errors.New("Endpoint not set when trying to create new madmin client")
+        b.Logger().Error("Error", "error", err)
+        return nil, err
+    }
+
+    if c.AccessKeyId == "" {
+        err = errors.New("AccessKeyId not set when trying to create new madmin client")
+        b.Logger().Error("Error", "error", err)
+        return nil, err
+    }
+
+    if c.SecretAccessKey == "" {
+        err = errors.New("SecretAccessKey not set when trying to create new madmin client")
+        b.Logger().Error("Error", "error", err)
+        return nil, err
+    }
+
+    client, err := madmin.New(c.Endpoint, c.AccessKeyId, c.SecretAccessKey, c.UseSSL)
+    if err != nil {
+        b.Logger().Error("Error getting new madmin client", "error", err)
+        return nil, err
+    }
+    
+    b.client = client
+    return b.client, nil
+}
+
+// Call this to invalidate the current backend client
+func (b *minioBackend) invalidateMadminClient() {
+    b.Logger().Debug("invalidateMadminClient")
+    
+    b.clientMutex.Lock()
+    defer b.clientMutex.Unlock()
+
+    b.client = nil
+}
+
 const minioHelp = `
-The minio secret backend returns minio static credential stored in vault or return dynamic STS credentials to access data on Minio server.
+The minio secret backend returns dynamic STS credentials to access data on Minio server.
 `

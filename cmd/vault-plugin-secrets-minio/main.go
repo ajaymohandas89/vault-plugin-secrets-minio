@@ -3,7 +3,7 @@ package main
 import (
     "os"
 
-    minio "github.com/kula/vault-plugin-secrets-minio/plugin"
+    minio "github.com/ajaymohandas89/vault-plugin-secrets-minio/plugin"
     hclog "github.com/hashicorp/go-hclog"
     "github.com/hashicorp/vault/api"
     "github.com/hashicorp/vault/sdk/plugin"

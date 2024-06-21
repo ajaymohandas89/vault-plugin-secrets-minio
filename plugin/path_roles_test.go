@@ -1,32 +1,37 @@
 package minio_test
 
 import (
-    "context"
-    "strconv"
-    "testing"
+	"context"
+	"fmt"
+	"strconv"
+	"testing"
 
-    "github.com/hashicorp/vault/sdk/logical"
-    "github.com/stretchr/testify/require"
-    "github.com/minio/madmin-go/v3"
-    minio "github.com/kula/vault-plugin-secrets-minio/plugin"
+	"github.com/hashicorp/vault/sdk/logical"
+	"github.com/minio/madmin-go/v3"
+	"github.com/stretchr/testify/require"
+	minio "github.com/ajaymohandas89/vault-plugin-secrets-minio/plugin"
 )
 
 const (
-    TEST_ROLE_NAME       = "test"
-    TEST_USERNAME_PREFIX = "test_prefix"
-    TEST_POLICY_NAME     = "readonly"
-    TEST_STS_MAX_TTL     = 100
+    TEST_ROLE_NAME              = "il-fund"
+    TEST_USERNAME_PREFIX        = "test-user-name-prefix"
+    TEST_POLICY_NAME            = "dev-us03-investor-vision"
+    TEST_POLICY_DOCUMENT        = "{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": [\n   {\n    \"Effect\": \"Allow\",\n    \"Action\": [\n     \"s3:GetBucketLocation\",\n     \"s3:GetObject\"\n    ],\n    \"Resource\": [\n     \"arn:aws:s3:::*\"\n    ]\n   }\n  ]\n }"
+    TEST_MAX_STS_TTL            = 100
+    TEST_MAX_TTL                = "30d"
+    TEST_STATIC_CREDENTIAL_TYPE = "static"
+    TEST_STS_CREDENTIAL_TYPE    = "sts"
 )
 
 func TestPluginRoleSuccess(t *testing.T) {
     reqStorage := new(logical.InmemStorage)
 
-    t.Run("Test Role Apis With No Error", func(t *testing.T) {
+    t.Run("Test Role Apis for static credential type With No Error", func(t *testing.T) {
         _, err := testRoleCreateOrUpdate(t, reqStorage, TEST_ROLE_NAME, map[string]interface{}{
             "role":             TEST_ROLE_NAME,
             "user_name_prefix": TEST_USERNAME_PREFIX,
             "policy_name":      TEST_POLICY_NAME,
-            "sts_max_ttl":		TEST_STS_MAX_TTL,
+            "credential_type":  TEST_STATIC_CREDENTIAL_TYPE,
         })
         require.NoError(t, err)
 
@@ -36,23 +41,81 @@ func TestPluginRoleSuccess(t *testing.T) {
         }
         require.Equal(t, TEST_USERNAME_PREFIX, resp.Data["user_name_prefix"])
         require.Equal(t, TEST_POLICY_NAME, resp.Data["policy_name"])
-        require.Equal(t, float64(TEST_STS_MAX_TTL), resp.Data["sts_max_ttl"])
+        require.Equal(t, TEST_STATIC_CREDENTIAL_TYPE, resp.Data["credential_type"])
+
+        days := resp.Data["max_ttl"].(float64) / 86400
+        duration := fmt.Sprintf("%.0fd", days)
+        require.Equal(t, TEST_MAX_TTL, duration)
 
         // Updating Role details
-        testRoleCreateOrUpdate(t, reqStorage, TEST_ROLE_NAME, map[string]interface{}{
+        _, err = testRoleCreateOrUpdate(t, reqStorage, TEST_ROLE_NAME, map[string]interface{}{
             "role":             TEST_ROLE_NAME,
             "user_name_prefix": "new_prefix",
             "policy_name":      TEST_POLICY_NAME,
-            "sts_max_ttl":		TEST_STS_MAX_TTL,
+            "max_ttl":		    TEST_MAX_TTL,
+            "credential_type":  TEST_STATIC_CREDENTIAL_TYPE,
         })
+        require.NoError(t, err)
 
-        resp, _ = testRoleRead(t, reqStorage, TEST_ROLE_NAME)
+        resp, err = testRoleRead(t, reqStorage, TEST_ROLE_NAME)
+        require.NoError(t, err)
         if resp == nil {
             t.Fatalf("Error: received nil response")
         }
         require.Equal(t, "new_prefix", resp.Data["user_name_prefix"])
         require.Equal(t, TEST_POLICY_NAME, resp.Data["policy_name"])
-        require.Equal(t, float64(TEST_STS_MAX_TTL), resp.Data["sts_max_ttl"])
+        require.Equal(t, TEST_STATIC_CREDENTIAL_TYPE, resp.Data["credential_type"])
+
+        days = resp.Data["max_ttl"].(float64) / 86400
+        duration = fmt.Sprintf("%.0fd", days)
+        require.Equal(t, TEST_MAX_TTL, duration)
+
+        _, err = testRoleDelete(t, reqStorage, TEST_ROLE_NAME)
+        require.NoError(t, err)
+
+        // Reading a deleted role
+        _, err = testRoleRead(t, reqStorage, TEST_ROLE_NAME)
+        require.Error(t, err)
+
+    })
+
+    t.Run("Test Role Apis for sts credential type With No Error", func(t *testing.T) {
+        _, err := testRoleCreateOrUpdate(t, reqStorage, TEST_ROLE_NAME, map[string]interface{}{
+            "role":             TEST_ROLE_NAME,
+            "policy_name":      TEST_POLICY_NAME,
+            "policy_document":  TEST_POLICY_DOCUMENT,
+            "max_sts_ttl":		TEST_MAX_STS_TTL,
+            "credential_type":  TEST_STS_CREDENTIAL_TYPE,
+        })
+        require.NoError(t, err)
+
+        resp, _ := testRoleRead(t, reqStorage, TEST_ROLE_NAME)
+        if resp == nil {
+            t.Fatalf("Error: received nil response")
+        }
+        require.Equal(t, TEST_POLICY_DOCUMENT, resp.Data["policy_document"])
+        require.Equal(t, TEST_STS_CREDENTIAL_TYPE, resp.Data["credential_type"])
+        require.Equal(t, float64(TEST_MAX_STS_TTL), resp.Data["max_sts_ttl"])
+        require.Equal(t, TEST_POLICY_NAME, resp.Data["policy_name"])
+
+        // Updating Role details
+        _, err = testRoleCreateOrUpdate(t, reqStorage, TEST_ROLE_NAME, map[string]interface{}{
+            "role":             TEST_ROLE_NAME,
+            "policy_document":  TEST_POLICY_DOCUMENT,
+            "max_sts_ttl":		500,
+            "credential_type":  TEST_STS_CREDENTIAL_TYPE,
+        })
+        require.NoError(t, err)
+
+        resp, err = testRoleRead(t, reqStorage, TEST_ROLE_NAME)
+        require.NoError(t, err)
+        if resp == nil {
+            t.Fatalf("Error: received nil response")
+        }
+
+        require.Equal(t, TEST_POLICY_DOCUMENT, resp.Data["policy_document"])
+        require.Equal(t, TEST_STS_CREDENTIAL_TYPE, resp.Data["credential_type"])
+        require.Equal(t, float64(500), resp.Data["max_sts_ttl"])
 
         _, err = testRoleDelete(t, reqStorage, TEST_ROLE_NAME)
         require.NoError(t, err)
@@ -68,7 +131,7 @@ func TestPluginRoleSuccess(t *testing.T) {
             "role":             TEST_ROLE_NAME,
             "user_name_prefix": TEST_USERNAME_PREFIX,
             "policy_name":      TEST_POLICY_NAME,
-            "sts_max_ttl":		TEST_STS_MAX_TTL,
+            "credential_type":  TEST_STATIC_CREDENTIAL_TYPE,
         })
         require.NoError(t, err)
 
@@ -87,10 +150,10 @@ func TestPluginRoleList(t *testing.T) {
             resp, err := testRoleCreateOrUpdate(t, reqStorage,
                 TEST_ROLE_NAME+strconv.Itoa(i),
                 map[string]interface{}{
-                    "role":             TEST_ROLE_NAME,
+                    "role":             TEST_ROLE_NAME+strconv.Itoa(i),
                     "user_name_prefix": TEST_USERNAME_PREFIX,
                     "policy_name":      TEST_POLICY_NAME,
-                    "sts_max_ttl":		TEST_STS_MAX_TTL,
+                    "credential_type":  TEST_STATIC_CREDENTIAL_TYPE,
                 },
             )
             if resp.IsError() {
@@ -120,7 +183,7 @@ func TestPluginRoleWriteError(t *testing.T) {
             "role":             TEST_ROLE_NAME,
             "user_name_prefix": TEST_USERNAME_PREFIX,
             "policy_name":      TEST_POLICY_NAME,
-            "sts_max_ttl":		TEST_STS_MAX_TTL,
+            "credential_type":  TEST_STATIC_CREDENTIAL_TYPE,
         })
 
         require.Nil(t, resp.Error())
@@ -135,7 +198,7 @@ func TestPluginRoleWriteError(t *testing.T) {
             "role":             TEST_ROLE_NAME,
             "user_name_prefix": TEST_USERNAME_PREFIX,
             "policy_name":      TEST_POLICY_NAME,
-            "sts_max_ttl":		TEST_STS_MAX_TTL,
+            "credential_type":  TEST_STATIC_CREDENTIAL_TYPE,
         })
         require.Nil(t, resp)
         require.Error(t, err)
@@ -150,7 +213,7 @@ func TestPluginRoleDelete(t *testing.T) {
             "role":             TEST_ROLE_NAME,
             "user_name_prefix": TEST_USERNAME_PREFIX,
             "policy_name":      TEST_POLICY_NAME,
-            "sts_max_ttl":		TEST_STS_MAX_TTL,
+            "credential_type":  TEST_STATIC_CREDENTIAL_TYPE,
         })
         require.NoError(t, resp.Error())
 
@@ -171,7 +234,8 @@ func TestPluginRoleDelete(t *testing.T) {
             "role":             TEST_ROLE_NAME,
             "user_name_prefix": TEST_USERNAME_PREFIX,
             "policy_name":      TEST_POLICY_NAME,
-            "sts_max_ttl":		TEST_STS_MAX_TTL,
+            "max_ttl":		    TEST_MAX_TTL,
+            "credential_type":  TEST_STATIC_CREDENTIAL_TYPE,
         })
         require.NoError(t, err)
 
@@ -185,7 +249,8 @@ func TestPluginRoleDelete(t *testing.T) {
             "role":             TEST_ROLE_NAME,
             "user_name_prefix": TEST_USERNAME_PREFIX,
             "policy_name":      TEST_POLICY_NAME,
-            "sts_max_ttl":		TEST_STS_MAX_TTL,
+            "max_ttl":		    TEST_MAX_TTL,
+            "credential_type":  TEST_STATIC_CREDENTIAL_TYPE,
         })
         require.NoError(t, err)
 
@@ -198,7 +263,7 @@ func TestPluginRoleDelete(t *testing.T) {
 
         var userMap = make(map[string]minio.UserInfo)
         userMap[TEST_ROLE_NAME] = userInfo
-        entry, _ := logical.StorageEntryJSON("users", userMap)
+        entry, err := logical.StorageEntryJSON("users", userMap)
         s.Put(context.Background(), entry)
 
         s.Underlying().FailPut(true)
@@ -227,15 +292,16 @@ func TestPluginReadError(t *testing.T) {
         s := &logical.InmemStorage{}
         s.Underlying().FailGet(true)
         
-        _, err := testRoleCreateOrUpdate(t, s, TEST_ROLE_NAME, map[string]interface{}{
+        resp, err := testRoleCreateOrUpdate(t, s, TEST_ROLE_NAME, map[string]interface{}{
             "role":             TEST_ROLE_NAME,
             "user_name_prefix": TEST_USERNAME_PREFIX,
             "policy_name":      TEST_POLICY_NAME,
-            "sts_max_ttl":		TEST_STS_MAX_TTL,
+            "max_ttl":		    TEST_MAX_TTL,
+            "credential_type":  TEST_STATIC_CREDENTIAL_TYPE,
         })
         require.NoError(t, err)
 
-        resp, err := testRoleRead(t, s, TEST_ROLE_NAME)
+        resp, err = testRoleRead(t, s, TEST_ROLE_NAME)
 
         require.Nil(t, resp)
         require.Error(t, err)
@@ -256,7 +322,8 @@ func TestPluginExistanceCheckError(t *testing.T) {
 
 func testRoleList(t *testing.T, s logical.Storage) (*logical.Response, error) {
     t.Helper()
-    return minio.Backend().HandleRequest(context.Background(), &logical.Request{
+    b, _ := getMinioBackend(t)
+    return b.HandleRequest(context.Background(), &logical.Request{
         Operation: logical.ListOperation,
         Path:      "roles/",
         Storage:   s,
@@ -265,7 +332,8 @@ func testRoleList(t *testing.T, s logical.Storage) (*logical.Response, error) {
 
 func testRoleCreateOrUpdate(t *testing.T, s logical.Storage, roleName string, d map[string]interface{}) (*logical.Response, error) {
     t.Helper()
-    return minio.Backend().HandleRequest(context.Background(), &logical.Request{
+    b, _ := getMinioBackend(t)
+    return b.HandleRequest(context.Background(), &logical.Request{
         Operation: logical.UpdateOperation,
         Path:      "roles/" + roleName,
         Data:      d,
@@ -275,7 +343,8 @@ func testRoleCreateOrUpdate(t *testing.T, s logical.Storage, roleName string, d 
 
 func testRoleRead(t *testing.T, s logical.Storage, roleName string) (*logical.Response, error) {
     t.Helper()
-    return minio.Backend().HandleRequest(context.Background(), &logical.Request{
+    b, _ := getMinioBackend(t)
+    return b.HandleRequest(context.Background(), &logical.Request{
         Operation: logical.ReadOperation,
         Path:      "roles/" + roleName,
         Storage:   s,
@@ -284,7 +353,8 @@ func testRoleRead(t *testing.T, s logical.Storage, roleName string) (*logical.Re
 
 func testRoleDelete(t *testing.T, s logical.Storage, roleName string) (*logical.Response, error) {
     t.Helper()
-    return minio.Backend().HandleRequest(context.Background(), &logical.Request{
+    b, _ := getMinioBackend(t)
+    return b.HandleRequest(context.Background(), &logical.Request{
         Operation: logical.DeleteOperation,
         Path:      "roles/" + roleName,
         Storage:   s,
@@ -293,7 +363,8 @@ func testRoleDelete(t *testing.T, s logical.Storage, roleName string) (*logical.
 
 func testRoleExistanceCheck(t *testing.T, s logical.Storage, d map[string]interface{}) (checkFound bool, exists bool, err error) {
     t.Helper()
-    return minio.Backend().HandleExistenceCheck(context.Background(), &logical.Request{
+    b, _ := getMinioBackend(t)
+    return b.HandleExistenceCheck(context.Background(), &logical.Request{
         Operation: logical.CreateOperation,
         Path:      "roles/" + d["role"].(string),
         Data:      d,

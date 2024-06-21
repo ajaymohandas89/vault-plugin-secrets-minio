@@ -5,95 +5,89 @@ import (
     "fmt"
     "time"
 
-    "github.com/hashicorp/errwrap"
     "github.com/hashicorp/vault/sdk/framework"
     "github.com/hashicorp/vault/sdk/logical"
 )
 
 func (b *minioBackend) pathKeysRead() *framework.Path {
     return &framework.Path{
-        Pattern:      fmt.Sprintf("creds/" + framework.GenericNameRegex("role")),
+        Pattern: "(creds|sts)/" + framework.GenericNameRegex("role"),
         HelpSynopsis: "Provision a key for this role.",
 
         Fields: map[string]*framework.FieldSchema{
-            "role": &framework.FieldSchema{
+            "role": {
                 Type:        framework.TypeString,
                 Description: "Name of role.",
             },
-            "policy": &framework.FieldSchema{
-                Type:        framework.TypeString,
-                Description: "Policy in JSON format",
-            },
-            "sts_ttl": &framework.FieldSchema{
+            "ttl": {
                 Type:        framework.TypeDurationSecond,
-                Description: "Lifetime of accessKey in seconds.",
-            },
-            "sts": &framework.FieldSchema{
-                Type: framework.TypeBool,
-                Default: false,
-                Description: "Flag to verify if the application needs sts or user static credentials.",
+                Default:     "900",
+                Description: "Lifetime of the returned sts credentials",
             },
         },
 
         Operations: map[logical.Operation]framework.OperationHandler{
-            logical.UpdateOperation: &framework.PathOperation{
+            logical.ReadOperation: &framework.PathOperation{
                 Callback: b.pathKeysCreate,
             },
             logical.DeleteOperation: &framework.PathOperation{
                 Callback: b.pathKeysRevoke,
+            },
+            logical.UpdateOperation: &framework.PathOperation{
+                Callback: b.pathKeysCreate,
             },
         },
     }
 }
 
 func (b *minioBackend) pathKeysCreate(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-    var resp map[string]interface{}
+    now := time.Now()
     roleName := d.Get("role").(string)
-    sts := d.Get("sts").(bool)
 
     role, err := b.GetRole(ctx, req.Storage, roleName)
     if err != nil {
-        return nil, errwrap.Wrapf("error fetching role: {{err}}", err)
+        return nil, fmt.Errorf("error fetching role: %v", err)
     }
 
-    userCreds, err := b.getUserCredential(ctx, req, roleName, role)
+    userCreds, err := b.getActiveUserCreds(ctx, req, roleName, role, now)
     if err != nil {
         return nil, err
     }
 
-    if sts {
-        var sts_ttl time.Duration
-        ttl := time.Duration(d.Get("sts_ttl").(int)) * time.Second
+    credentialType := role.CredentialType
+    var resp map[string]interface{}
 
-        if ttl == 0 {
-            sts_ttl = role.StsMaxTTL
+    switch credentialType {
+    case StaticCredentialType:
+        resp = map[string]interface{}{
+            "accessKeyId":     		userCreds.AccessKeyID,
+            "secretAccessKey": 		userCreds.SecretAccessKey,
+            "policy_name":     		role.PolicyName,
+            "ttl":             		userCreds.ExpirationDate.Format(time.DateTime),
+            "userAccountStatus": 	userCreds.Status,
+        }
+    case StsCredentialType:
+        var sts_ttl int
+        ttl := int(d.Get("ttl").(int))
+        maxTtl := int(role.MaxStsTTL.Seconds())
+    
+        if ttl == 0 || ttl > maxTtl {
+            sts_ttl = maxTtl
         } else {
             sts_ttl = ttl
         }
-
-        policy := d.Get("policy").(string)
-
-        newKey, err := b.getSTS(ctx, req, userCreds, policy, sts_ttl)
+        newKey, err := b.getSTS(ctx, req, userCreds, role.PolicyDocument, sts_ttl)
         if err != nil {
             return nil, err
         }
-
-        // Gin up response
         resp = map[string]interface{}{
             "accessKeyId":     newKey.AccessKeyID,
             "secretAccessKey": newKey.SecretAccessKey,
-            "ttl":             sts_ttl.Seconds(),
-        }
-    } else {
-        // Gin up response
-        resp = map[string]interface{}{
-            "accessKeyId":     userCreds.AccessKeyID,
-            "secretAccessKey": userCreds.SecretAccessKey,
-            "policy_name":     role.PolicyName,
-            "ttl":             0,
-            "userAccountStatus": userCreds.Status,
+            "sessionToken":	   newKey.SessionToken,
+            "ttl":             newKey.Expiration.Format(time.DateTime),
         }
     }
+    
 
     return &logical.Response{
         Data: resp,
@@ -101,36 +95,18 @@ func (b *minioBackend) pathKeysCreate(ctx context.Context, req *logical.Request,
 }
 
 func (b *minioBackend) pathKeysRevoke(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-    role := d.Get("role").(string)
-    err := b.removeUser(ctx, req, role)
-
+    roleName := d.Get("role").(string)
+    r, err := b.GetRole(ctx, req.Storage, roleName)
     if err != nil {
         return nil, err
     }
-
+    oldestCreds, err := b.getOldestUserCreds(ctx, req, roleName)
+    if err != nil {
+        return nil, err
+    }
+    err = b.removeUser(ctx, req, r, roleName, oldestCreds)
+    if err != nil {
+        return nil, err
+    }
     return nil, nil
-}
-
-func (b *minioBackend) getUserCredential(ctx context.Context, req *logical.Request, roleName string, role *Role) (*UserInfo, error) {
-    // Getting user details from vault
-    userInfo, err := b.getUserInfo(ctx, req.Storage, roleName)
-    if err != nil {
-        return nil, err
-    }
-
-    if userInfo == nil {
-        var newKeyName string
-        if role.UserNamePrefix == "" {
-            newKeyName = fmt.Sprintf("%s", req.ID)
-        } else {
-            newKeyName = fmt.Sprintf("%s-%s", role.UserNamePrefix, req.ID)
-        }
-
-        // if user is not present in vault create new and add user to vault
-        userInfo, err = b.addUser(ctx, req, newKeyName, role.PolicyName, roleName)
-        if err != nil {
-            return nil, err
-        }
-    }
-    return userInfo, nil
 }

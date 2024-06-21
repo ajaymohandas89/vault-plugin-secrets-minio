@@ -2,20 +2,28 @@ package minio
 
 import (
     "context"
-
-    "github.com/hashicorp/errwrap"
+    "strings"
+    "fmt"
     "github.com/hashicorp/vault/sdk/framework"
     "github.com/hashicorp/vault/sdk/logical"
 )
 
 const (
-    configStoragePath = "config"
+    configStoragePath = "config/root"
 )
+
+type Config struct {
+    Endpoint string `json:"endpoint"`
+    AccessKeyId string `json:"accessKeyId"`
+    SecretAccessKey string `json:"secretAccessKey"`
+    UseSSL bool `json:"useSSL"`
+    Configured bool `json:"is_configured"`
+}
 
 // Define the CRU functions for the config path
 func (b *minioBackend) pathConfigCRUD() *framework.Path {
     return &framework.Path{
-    Pattern: "config",
+    Pattern: configStoragePath,
     HelpSynopsis: "Configure the Minio connection.",
     HelpDescription: "Use this endpoint to set the Minio endpoint, accessKeyId, secretAccessKey and SSL settings.",
 
@@ -87,12 +95,12 @@ func (b *minioBackend) pathConfigUpdate(ctx context.Context, req *logical.Reques
         // Make a new storage entry
         entry, err := logical.StorageEntryJSON(configStoragePath, c)
         if err != nil {
-            return nil, errwrap.Wrapf("failed to generate JSON configuration: {{err}}", err)
+            return nil, fmt.Errorf("failed to generate JSON configuration: %v", err)
         }
 
         // And store it
         if err := req.Storage.Put(ctx, entry); err != nil {
-            return nil, errwrap.Wrapf("Failed to persist configuration: {{err}}", err)
+            return nil, fmt.Errorf("failed to persist configuration: %v", err)
         }
 
     }
@@ -112,5 +120,74 @@ func (b *minioBackend) pathConfigDelete(ctx context.Context, req *logical.Reques
         return nil, nil
     }
 
-    return nil, errwrap.Wrapf("failed to delete configuration: {{err}}", err)
+    return nil, fmt.Errorf("failed to delete configuration: %v", err)
+}
+
+func (c *Config) Update(d *framework.FieldData) (bool, error) {
+    if d == nil {
+        return false, logical.CodedError(400, "Bad Request Error")
+    }
+
+    changed := false
+
+    keys := []string{"endpoint", "accessKeyId", "secretAccessKey"}
+
+    for _, key := range keys {
+    if v, ok := d.GetOk(key); ok {
+        nv := strings.TrimSpace(v.(string))
+
+        switch key {
+        case "endpoint":
+        c.Endpoint = nv
+        c.Configured = true
+        changed = true
+        case "accessKeyId":
+        c.AccessKeyId = nv
+        c.Configured = true
+        changed = true
+        case "secretAccessKey":
+        c.SecretAccessKey = nv
+        c.Configured = true
+        changed = true
+        }
+    }
+    }
+
+    if v, ok := d.GetOk("useSSL"); ok {
+    nv := v.(bool)
+    c.UseSSL = nv
+    c.Configured = true
+    changed = true
+    }
+
+    return changed, nil
+}
+
+func (b *minioBackend) GetConfig(ctx context.Context, s logical.Storage) (*Config, error) {
+    c := DefaultConfig()
+
+    entry, err := s.Get(ctx, configStoragePath);
+    if err != nil {
+        return nil, fmt.Errorf("failed to get configuration from backend: %v", err)
+    }
+
+    if entry == nil || len(entry.Value) == 0 {
+        return c, nil
+    }
+
+    if err := entry.DecodeJSON(&c); err != nil {
+        return nil, fmt.Errorf("failed to decode configuration: %v", err)
+    }
+
+    return c, nil
+}
+
+func DefaultConfig() *Config {
+    return &Config{
+    Endpoint: "",
+    AccessKeyId: "",
+    SecretAccessKey: "",
+    UseSSL: false,
+    Configured: false,
+    }
 }

@@ -7,7 +7,6 @@ import (
 
     "github.com/hashicorp/vault/sdk/logical"
     "github.com/stretchr/testify/require"
-    minio "github.com/kula/vault-plugin-secrets-minio/plugin"
 )
 
 const (
@@ -15,6 +14,7 @@ const (
     TEST_APP_OSS_ACCESS_KEY_ID     = "test-access-key-id"
     TEST_APP_OSS_SECRET_ACCESS_KEY = "test-secret-access-key"
     TEST_OSS_ENDPOINT_USE_SSL      = true
+    configStoragePath = "config/root"
 )
 
 func TestConfigSuccess(t *testing.T) {
@@ -42,7 +42,7 @@ func TestConfigSuccess(t *testing.T) {
         // Updating the config
         err = testConfigCreateOrUpdate(t, reqStorage, map[string]interface{}{
             "endpoint":        TEST_APP_OSS_ENDPOINT,
-            "accessKeyId":     "new-access-key-id",
+            "accessKeyId":     "new-access-kye-id",
             "secretAccessKey": "new-secret-access-key",
             "useSSL":          TEST_OSS_ENDPOINT_USE_SSL,
         })
@@ -51,7 +51,7 @@ func TestConfigSuccess(t *testing.T) {
 
         err = testConfigRead(t, reqStorage, map[string]interface{}{
             "endpoint":        TEST_APP_OSS_ENDPOINT,
-            "accessKeyId":     "new-access-key-id",
+            "accessKeyId":     "new-access-kye-id",
             "secretAccessKey": "new-secret-access-key",
             "useSSL":          TEST_OSS_ENDPOINT_USE_SSL,
         })
@@ -71,7 +71,7 @@ func TestConfigReadError(t *testing.T) {
     t.Run("Test Plugin Configuration Reading Empty Configuration", func(t *testing.T) {
         err := testConfigRead(t, reqStorage, map[string]interface{}{
             "endpoint":        TEST_APP_OSS_ENDPOINT,
-            "accessKeyId":     "new-access-key-id",
+            "accessKeyId":     "new-access-kye-id",
             "secretAccessKey": "new-secret-access-key",
             "useSSL":          TEST_OSS_ENDPOINT_USE_SSL,
         })
@@ -176,18 +176,20 @@ func TestConfigDeleteError(t *testing.T) {
     })
 }
 
-func testConfigDelete(_ *testing.T, s logical.Storage) (*logical.Response, error) {
-    return minio.Backend().HandleRequest(context.Background(), &logical.Request{
+func testConfigDelete(t *testing.T, s logical.Storage) (*logical.Response, error) {
+    b, _ := getMinioBackend(t)
+    return b.HandleRequest(context.Background(), &logical.Request{
         Operation: logical.DeleteOperation,
-        Path:      "config",
+        Path:      configStoragePath,
         Storage:   s,
     })
 }
 
-func testConfigCreateOrUpdate(_ *testing.T, s logical.Storage, d map[string]interface{}) error {
-    resp, err := minio.Backend().HandleRequest(context.Background(), &logical.Request{
+func testConfigCreateOrUpdate(t *testing.T, s logical.Storage, d map[string]interface{}) error {
+    b, _ := getMinioBackend(t)
+    resp, err := b.HandleRequest(context.Background(), &logical.Request{
         Operation: logical.UpdateOperation,
-        Path:      "config",
+        Path:      configStoragePath,
         Data:      d,
         Storage:   s,
     })
@@ -202,10 +204,11 @@ func testConfigCreateOrUpdate(_ *testing.T, s logical.Storage, d map[string]inte
     return nil
 }
 
-func testConfigRead(_ *testing.T, s logical.Storage, expected map[string]interface{}) error {
-    resp, err := minio.Backend().HandleRequest(context.Background(), &logical.Request{
+func testConfigRead(t *testing.T, s logical.Storage, expected map[string]interface{}) error {
+    b, _ := getMinioBackend(t)
+    resp, err := b.HandleRequest(context.Background(), &logical.Request{
         Operation: logical.ReadOperation,
-        Path:      "config",
+        Path:      configStoragePath,
         Storage:   s,
     })
 
@@ -218,7 +221,7 @@ func testConfigRead(_ *testing.T, s logical.Storage, expected map[string]interfa
     }
 
     for key, expectedVal := range expected {
-        actualVal := resp.Data[key]
+        actualVal, _ := resp.Data[key]
 
         if expectedVal != actualVal {
             return fmt.Errorf(`expected data["%s"] = %v, instead got %v"`, key, actualVal, actualVal)
