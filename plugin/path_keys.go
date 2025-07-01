@@ -11,7 +11,7 @@ import (
 
 func (b *minioBackend) pathKeysRead() *framework.Path {
     return &framework.Path{
-        Pattern: "(creds|sts)/" + framework.GenericNameRegex("role"),
+        Pattern:      "(creds|sts)/" + framework.GenericNameRegex("role"),
         HelpSynopsis: "Provision a key for this role.",
 
         Fields: map[string]*framework.FieldSchema{
@@ -44,15 +44,33 @@ func (b *minioBackend) pathKeysCreate(ctx context.Context, req *logical.Request,
     now := time.Now()
     roleName := d.Get("role").(string)
 
+    b.Logger().Info("Retrieving role " + roleName + " details from vault!")
     role, err := b.GetRole(ctx, req.Storage, roleName)
     if err != nil {
+        b.Logger().Error("error fetching role!", err)
         return nil, fmt.Errorf("error fetching role: %v", err)
     }
 
-    userCreds, err := b.getActiveUserCreds(ctx, req, roleName, role, now)
+    client, err := b.getMadminClient(ctx, req.Storage)
     if err != nil {
+        b.Logger().Error("error fetching madmin client!", err)
         return nil, err
     }
+
+    maxTtl, err := time.ParseDuration(role.MaxTTL)
+    if err != nil {
+        b.Logger().Error("Invalid Max ttl:", err)
+        return nil, err
+    }
+
+    userCreds, err := b.getActiveUserCreds(ctx, client, req, roleName, role, now, maxTtl)
+    if err != nil {
+        b.Logger().Error("error fetching user credentials for", roleName, err)
+        return nil, err
+    }
+    elapsed := now.Sub(userCreds.CreationTime)
+    ttl := maxTtl - elapsed
+    ttl = ttl.Truncate(time.Second)
 
     credentialType := role.CredentialType
     var resp map[string]interface{}
@@ -60,17 +78,17 @@ func (b *minioBackend) pathKeysCreate(ctx context.Context, req *logical.Request,
     switch credentialType {
     case StaticCredentialType:
         resp = map[string]interface{}{
-            "accessKeyId":     		userCreds.AccessKeyID,
-            "secretAccessKey": 		userCreds.SecretAccessKey,
-            "policy_name":     		role.PolicyName,
-            "ttl":             		userCreds.ExpirationDate.Format(time.DateTime),
-            "userAccountStatus": 	userCreds.Status,
+            "accessKeyId":       userCreds.AccessKeyID,
+            "secretAccessKey":   userCreds.SecretAccessKey,
+            "policy_name":       role.PolicyName,
+            "ttl":               ttl.String(),
+            "userAccountStatus": userCreds.Status,
         }
     case StsCredentialType:
         var sts_ttl int
         ttl := int(d.Get("ttl").(int))
         maxTtl := int(role.MaxStsTTL.Seconds())
-    
+
         if ttl == 0 || ttl > maxTtl {
             sts_ttl = maxTtl
         } else {
@@ -83,11 +101,10 @@ func (b *minioBackend) pathKeysCreate(ctx context.Context, req *logical.Request,
         resp = map[string]interface{}{
             "accessKeyId":     newKey.AccessKeyID,
             "secretAccessKey": newKey.SecretAccessKey,
-            "sessionToken":	   newKey.SessionToken,
+            "sessionToken":    newKey.SessionToken,
             "ttl":             newKey.Expiration.Format(time.DateTime),
         }
     }
-    
 
     return &logical.Response{
         Data: resp,
@@ -96,16 +113,20 @@ func (b *minioBackend) pathKeysCreate(ctx context.Context, req *logical.Request,
 
 func (b *minioBackend) pathKeysRevoke(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
     roleName := d.Get("role").(string)
+    b.Logger().Info("Revoking oldest credentials from vault and minio for ", roleName)
     r, err := b.GetRole(ctx, req.Storage, roleName)
     if err != nil {
+        b.Logger().Error("error in getting role", err)
         return nil, err
     }
-    oldestCreds, err := b.getOldestUserCreds(ctx, req, roleName)
+    client, err := b.getMadminClient(ctx, req.Storage)
     if err != nil {
+        b.Logger().Error("error in getting minio admin client", err)
         return nil, err
     }
-    err = b.removeUser(ctx, req, r, roleName, oldestCreds)
+    err = b.removeOldestUserCreds(ctx, req, client, roleName, r)
     if err != nil {
+        b.Logger().Error("error in revoking oldest credentials", err)
         return nil, err
     }
     return nil, nil

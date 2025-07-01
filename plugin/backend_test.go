@@ -12,6 +12,7 @@ func TestMinioBackend(t *testing.T) {
     t.Run("Test Minio Backend Successfully Initialized", func(t *testing.T) {
         config := logical.TestBackendConfig()
         config.System = logical.TestSystemView()
+        config.StorageView = new(logical.InmemStorage)
         b, err := minio.Factory(context.Background(), config)
         require.NoError(t, err)
         require.NotNil(t, b)
@@ -21,5 +22,6 @@ func TestMinioBackend(t *testing.T) {
 func getMinioBackend(tb testing.TB) (logical.Backend, error) {
     config := logical.TestBackendConfig()
     config.System = logical.TestSystemView()
+    config.StorageView = new(logical.InmemStorage)
     return minio.Factory(context.Background(), config)
 }

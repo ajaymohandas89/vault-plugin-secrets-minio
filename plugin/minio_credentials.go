@@ -2,6 +2,7 @@ package minio
 
 import (
     "context"
+    "strings"
     "time"
 
     "encoding/base64"
@@ -26,15 +27,11 @@ type UserInfo struct {
     SecretAccessKey string               `json:"secretAccessKey,omitempty"`
     PolicyName      string               `json:"policyName,omitempty"`
     Status          madmin.AccountStatus `json:"status"`
-    ExpirationDate  time.Time            `json:"expirationDate"`
+    CreationTime    time.Time            `json:"creationTime"`
 }
 
-func (b *minioBackend) getActiveUserCreds(ctx context.Context, req *logical.Request, roleName string, role *Role, now time.Time) (*UserInfo, error) {
-    userCredsMap, err := b.getAllUserCreds(ctx, req.Storage)
-    if err != nil {
-        return nil, err
-    }
-
+func (b *minioBackend) getActiveUserCreds(ctx context.Context, client *madmin.AdminClient, req *logical.Request,
+    roleName string, role *Role, now time.Time, maxTtl time.Duration) (*UserInfo, error) {
     var newKeyName string
     if role.UserNamePrefix == "" {
         newKeyName = req.ID
@@ -42,49 +39,48 @@ func (b *minioBackend) getActiveUserCreds(ctx context.Context, req *logical.Requ
         newKeyName = fmt.Sprintf("%s-%s", role.UserNamePrefix, req.ID)
     }
 
-    users, ok := userCredsMap[roleName]
+    users, ok := b.userCredsMap[roleName]
     if ok {
         if len(users) == 1 {
-            userCreds := users[0]
-            if b.isUserCredentialExpired(ctx, now, userCreds) {
-                newUserCreds, err := b.addUser(ctx, req, newKeyName, role, roleName, now)
+            b.Logger().Info("Vault has one oss credential for " + roleName)
+            cred1 := users[0]
+            if b.isUserCredentialExpired(cred1, maxTtl, now) {
+                b.Logger().Info("Credentials expired and hence creating new one")
+                cred2, err := b.addUser(ctx, req, client, newKeyName, role, roleName)
                 if err != nil {
                     return nil, err
                 }
-                return newUserCreds, nil 
+                return cred2, nil
             } else {
-                return &userCreds, nil
+                return &cred1, nil
             }
         } else {
-            oldestCreds, err := b.getOldestUserCreds(ctx, req, roleName)
+            b.Logger().Info("Vault has two oss credentials for " + roleName)
+            oldCredential := users[0]
+            if users[1].CreationTime.Before(oldCredential.CreationTime) {
+                oldCredential = users[1]
+            }
+
+            if !b.isUserCredentialExpired(oldCredential, maxTtl, now) {
+                return &oldCredential, nil
+            }
+            cred2, cred3, err := b.removeOldestAndAddNewUserCreds(ctx, req, client, newKeyName, roleName, role)
             if err != nil {
                 return nil, err
             }
-            err = b.removeUser(ctx, req, role, roleName, oldestCreds)
-            if err != nil {
-                return nil, err
-            }
-            userCredsMap, err = b.getAllUserCreds(ctx, req.Storage)
-            if err != nil {
-                return nil, err
-            }
-            userCreds := userCredsMap[roleName][0]
-            newUserCreds, err := b.addUser(ctx, req, newKeyName, role, roleName, now)
-            if err != nil {
-                return nil, err
-            }
-            if b.isUserCredentialExpired(ctx, now, userCreds) {
-                return newUserCreds, nil
+            if b.isUserCredentialExpired(*cred2, maxTtl, now) {
+                b.Logger().Info("Credentials expired and hence returning new one")
+                return cred3, nil
             } else {
-                return &userCreds, nil
+                return cred2, nil
             }
         }
     }
 
-    b.Logger().Info("This roleName", roleName, "is not found in vault!")
+    b.Logger().Info("Role:", roleName, "is not found in vault!")
     b.Logger().Info("Application requesting for user credentials for the first time")
 
-    userCreds, err := b.addUser(ctx, req, newKeyName, role, roleName, now)
+    userCreds, err := b.addUser(ctx, req, client, newKeyName, role, roleName)
     if err != nil {
         return nil, err
     }
@@ -92,63 +88,48 @@ func (b *minioBackend) getActiveUserCreds(ctx context.Context, req *logical.Requ
 
 }
 
-func (b *minioBackend) addUser(ctx context.Context, req *logical.Request, userAccesskey string,
-    role *Role, roleName string, now time.Time) (*UserInfo, error) {
-    b.Logger().Info("Adding user by madmin client and persisting it inside local storage")
-
-    client, err := b.getMadminClient(ctx, req.Storage)
-    if err != nil {
-        return nil, err
-    }
+func (b *minioBackend) addUser(ctx context.Context, req *logical.Request, client *madmin.AdminClient, userAccesskey string,
+    role *Role, roleName string) (*UserInfo, error) {
+    b.userCredsMapMutex.Lock()
+    defer b.userCredsMapMutex.Unlock()
 
     secretAccessKey, err := b.generateSecretAccessKey()
     if err != nil {
         return nil, err
     }
-
+    b.Logger().Info("Adding user to minio")
     err = client.AddUser(ctx, userAccesskey, secretAccessKey)
     if err != nil {
-        b.Logger().Error("Adding minio user failed", "userAccesskey", userAccesskey, "error", err)
+        b.Logger().Error("Adding minio user failed userAccesskey", userAccesskey, "error", err)
         return nil, err
     }
 
     // Attaching policy to the user
     policyAssociationReq := madmin.PolicyAssociationReq{
-        Policies: []string{role.PolicyName},
-        User: userAccesskey,
+        Policies: strings.Split(role.PolicyName, ","),
+        User:     userAccesskey,
     }
 
     _, err = client.AttachPolicy(ctx, policyAssociationReq)
     if err != nil {
-        b.Logger().Error("Setting minio user policy failed", "minoUserAccesskey", userAccesskey,
+        b.Logger().Error("Setting minio user policy failed userAccesskey", userAccesskey,
             "policy", role.PolicyName, "error", err)
         return nil, err
     }
 
-    maxTtl := int(role.MaxTTL.Seconds() / 86400)
-    
     // Gin up the madmin.UserInfo struct
     userInfo := UserInfo{
         AccessKeyID:     userAccesskey,
         SecretAccessKey: secretAccessKey,
         PolicyName:      role.PolicyName,
         Status:          madmin.AccountEnabled,
-        ExpirationDate:  now.AddDate(0, 0, maxTtl),
+        CreationTime:    time.Now(),
     }
     //Update map with userInfo and store it in vault storage
-    userMap, err := b.getAllUserCreds(ctx, req.Storage)
-    if err != nil {
-        return nil, err
-    }
+    b.userCredsMap[roleName] = append(b.userCredsMap[roleName], userInfo)
 
-    userMap[roleName] = append(userMap[roleName], userInfo)
-
-    b.updateVaultStorage(ctx, req, userMap)
-
-    // Destroy any old client which may exist so we get a new one
-    // with the next request
-    b.invalidateMadminClient()
-
+    b.Logger().Info("Updating vault persistence storage with new credentials")
+    b.updateVaultStorage(ctx, req)
     return &userInfo, nil
 }
 
@@ -182,59 +163,36 @@ func (b *minioBackend) getSTS(ctx context.Context, req *logical.Request, userInf
     return v, nil
 }
 
-func (b *minioBackend) removeUser(ctx context.Context, req *logical.Request, role *Role, roleName string, oldestCreds *UserInfo) error {
-    b.Logger().Info("Removing user by madmin client")
+func (b *minioBackend) removeAllUser(ctx context.Context, req *logical.Request, role *Role, roleName string) error {
+    b.userCredsMapMutex.Lock()
+    defer b.userCredsMapMutex.Unlock()
+
     client, err := b.getMadminClient(ctx, req.Storage)
     if err != nil {
-        return fmt.Errorf("failed to receive madmin client: %v", err)
-    }
-    policyAssociationReq := madmin.PolicyAssociationReq{
-        Policies: []string{role.PolicyName},
-        User: oldestCreds.AccessKeyID,
-    }
-    _, err = client.DetachPolicy(ctx, policyAssociationReq)
-    if err != nil {
-        return fmt.Errorf("failed to detach policy by madmin client: %v", err)
-    }
-    if err = client.RemoveUser(ctx, oldestCreds.AccessKeyID); err != nil {
-        return fmt.Errorf("failed to delete user access by madmin: %v", err)
-    }
-
-    b.Logger().Info("Removing oldest credentials from vault and updating persistent storage")
-    userMap, err := b.getAllUserCreds(ctx, req.Storage)
-    if err != nil {
+        b.Logger().Error("error fetching madmin client!", err)
         return err
     }
-    if users, exists := userMap[roleName]; exists {
-        if len(users) == 1 {
-            delete(userMap, roleName)
-        } else {
-            //Iterate over users and find userInfo to delete
-            for i, userCred := range users {
-                if userCred.AccessKeyID == oldestCreds.AccessKeyID && userCred.SecretAccessKey == oldestCreds.SecretAccessKey {
-                    userMap[roleName] = append(users[:i], users[i + 1:]...)
-                }
+    if users, exists := b.userCredsMap[roleName]; exists {
+        for _, creds := range users {
+            policyAssociationReq := madmin.PolicyAssociationReq{
+                Policies: strings.Split(role.PolicyName, ","),
+                User:     creds.AccessKeyID,
             }
-        }
-    }
-
-    b.updateVaultStorage(ctx, req, userMap)
-    b.invalidateMadminClient()
-    return nil
-}
-
-func (b *minioBackend) removeAllUser(ctx context.Context, req *logical.Request, role *Role, roleName string) (error) {
-    userCredsMap, err := b.getAllUserCreds(ctx, req.Storage)
-    if err != nil {
-        return err
-    }
-    if users, exists := userCredsMap[roleName]; exists {
-        for _, userCred := range users {
-            err = b.removeUser(ctx, req, role, roleName, &userCred)
+            _, err = client.DetachPolicy(ctx, policyAssociationReq)
             if err != nil {
+                b.Logger().Error("Error in detaching policy for ", roleName, "accessKey", creds.AccessKeyID)
+                return err
+            }
+            if err = client.RemoveUser(ctx, creds.AccessKeyID); err != nil {
+                b.Logger().Error("Error in removing user for ", roleName, "accessKey", creds.AccessKeyID)
                 return err
             }
         }
+        delete(b.userCredsMap, roleName)
+        b.Logger().Info("Updating vault persistent storage after removing all user credentials")
+        b.updateVaultStorage(ctx, req)
+    } else {
+        b.Logger().Info(roleName + " does not exist in vault")
     }
     return nil
 }
@@ -250,57 +208,148 @@ func (b *minioBackend) generateSecretAccessKey() (string, error) {
     return base64.StdEncoding.EncodeToString(randBytes), nil
 }
 
-func (b *minioBackend) getAllUserCreds(ctx context.Context, s logical.Storage) (map[string][]UserInfo, error) {
-    b.Logger().Info("Retrieving user info stored in persistent storage")
+func (b *minioBackend) removeOldestUserCreds(ctx context.Context, req *logical.Request, client *madmin.AdminClient, roleName string, role *Role) error {
+    b.userCredsMapMutex.Lock()
+    defer b.userCredsMapMutex.Unlock()
 
-    entry, err := s.Get(ctx, userStoragePath)
-    if err != nil {
-        return nil, fmt.Errorf("failed to get user entry map from persistent storage: %v", err)
-    }
-
-    var userMap = make(map[string][]UserInfo)
-    //if there is no credentials created for the role, entry will be nil. Application requesting creds for first time.
-    if entry == nil {
-        return userMap, nil
-    }
-
-    if err := entry.DecodeJSON(&userMap); err != nil {
-        return nil, fmt.Errorf("failed to decode user entry map: %v", err)
-    }
-
-    return userMap, nil
-}
-
-func (b *minioBackend) getOldestUserCreds(ctx context.Context, req *logical.Request, roleName string) (*UserInfo, error) {
-    userInfoMap, err := b.getAllUserCreds(ctx, req.Storage)
-    if err != nil {
-        return nil, err
-    }
-
-    users := userInfoMap[roleName]
-    oldCredential := users[0]    
-    for i := 1; i < len(users); i++ {
-        if users[i].ExpirationDate.Before(oldCredential.ExpirationDate) {
-            oldCredential = users[i]
+    users := b.userCredsMap[roleName]
+    oldCredential := users[0]
+    if len(users) > 1 {
+        if users[1].CreationTime.Before(oldCredential.CreationTime) {
+            oldCredential = users[1]
         }
     }
 
-    return &oldCredential, nil
-}
-
-func (b *minioBackend) isUserCredentialExpired(ctx context.Context, now time.Time, userInfo UserInfo) (bool) {
-    return now.After(userInfo.ExpirationDate)
-}
-
-func (b *minioBackend) updateVaultStorage(ctx context.Context, req *logical.Request, userMap map[string][]UserInfo) error {
-    entry, err := logical.StorageEntryJSON(userStoragePath, userMap)
+    policyAssociationReq := madmin.PolicyAssociationReq{
+        Policies: strings.Split(role.PolicyName, ","),
+        User:     oldCredential.AccessKeyID,
+    }
+    _, err := client.DetachPolicy(ctx, policyAssociationReq)
     if err != nil {
-        return fmt.Errorf("failed to generate JSON configuration when adding user details: %v", err)
+        b.Logger().Error("Error in detaching policy for ", roleName, "accessKey", oldCredential.AccessKeyID)
+        return err
+    }
+    if err = client.RemoveUser(ctx, oldCredential.AccessKeyID); err != nil {
+        b.Logger().Error("Error in removing user for ", roleName, "accessKey", oldCredential.AccessKeyID)
+        return err
+    }
+
+    b.Logger().Info("Removing oldest credentials from vault")
+    if len(users) == 1 {
+        delete(b.userCredsMap, roleName)
+    } else {
+        if users[0].AccessKeyID == oldCredential.AccessKeyID && users[0].SecretAccessKey == oldCredential.SecretAccessKey {
+            b.userCredsMap[roleName] = users[1:] //Remove first element
+        } else {
+            b.userCredsMap[roleName] = users[:1] //Remove second element
+        }
+    }
+
+    b.Logger().Info("Updating vault persistent storage after removing oldest user credentials")
+    b.updateVaultStorage(ctx, req)
+    return nil
+}
+
+func (b *minioBackend) removeOldestAndAddNewUserCreds(ctx context.Context, req *logical.Request,
+    client *madmin.AdminClient, newUserAccesskey string, roleName string,
+    role *Role) (*UserInfo, *UserInfo, error) {
+
+    b.userCredsMapMutex.Lock()
+    defer b.userCredsMapMutex.Unlock()
+
+    b.Logger().Info("Deleting oldest expired credentials from minio for " + roleName)
+    users := b.userCredsMap[roleName]
+    oldCredential := users[0]
+    if users[1].CreationTime.Before(oldCredential.CreationTime) {
+        oldCredential = users[1]
+    }
+
+    policyAssociationReq := madmin.PolicyAssociationReq{
+        Policies: strings.Split(role.PolicyName, ","),
+        User:     oldCredential.AccessKeyID,
+    }
+    _, err := client.DetachPolicy(ctx, policyAssociationReq)
+    if err != nil {
+        b.Logger().Error("Error in detaching policy for ", roleName, "accessKey", oldCredential.AccessKeyID)
+        return nil, nil, err
+    }
+    if err = client.RemoveUser(ctx, oldCredential.AccessKeyID); err != nil {
+        b.Logger().Error("Error in removing user for ", roleName, "accessKey", oldCredential.AccessKeyID)
+        return nil, nil, err
+    }
+
+    b.Logger().Info("Removing oldest expired credentials from vault")
+    if users[0].AccessKeyID == oldCredential.AccessKeyID && users[0].SecretAccessKey == oldCredential.SecretAccessKey {
+        b.userCredsMap[roleName] = users[1:] //Remove first element
+    } else {
+        b.userCredsMap[roleName] = users[:1] //Remove second element
+    }
+
+    cred2 := b.userCredsMap[roleName][0]
+
+    secretAccessKey, err := b.generateSecretAccessKey()
+    if err != nil {
+        return nil, nil, err
+    }
+    b.Logger().Info("Adding new user credentials to minio for " + roleName)
+    err = client.AddUser(ctx, newUserAccesskey, secretAccessKey)
+    if err != nil {
+        b.Logger().Error("Adding minio user failed userAccesskey", newUserAccesskey, "error", err)
+        return nil, nil, err
+    }
+
+    // Attaching policy to the user
+    policyAssociationReq = madmin.PolicyAssociationReq{
+        Policies: strings.Split(role.PolicyName, ","),
+        User:     newUserAccesskey,
+    }
+
+    _, err = client.AttachPolicy(ctx, policyAssociationReq)
+    if err != nil {
+        b.Logger().Error("Setting minio user policy failed userAccesskey", newUserAccesskey,
+            "policy", role.PolicyName, "error", err)
+        return nil, nil, err
+    }
+
+    // Gin up the madmin.UserInfo struct
+    cred3 := UserInfo{
+        AccessKeyID:     newUserAccesskey,
+        SecretAccessKey: secretAccessKey,
+        PolicyName:      role.PolicyName,
+        Status:          madmin.AccountEnabled,
+        CreationTime:    time.Now(),
+    }
+    //Update map with userInfo and store it in vault storage
+    b.userCredsMap[roleName] = append(b.userCredsMap[roleName], cred3)
+
+    b.Logger().Info("Updating vault persistent storage")
+    b.updateVaultStorage(ctx, req)
+    return &cred2, &cred3, nil
+}
+
+func (b *minioBackend) updateVaultStorage(ctx context.Context, req *logical.Request) error {
+    entry, err := logical.StorageEntryJSON(userStoragePath, &b.userCredsMap)
+    if err != nil {
+        b.Logger().Info("Failed to generate JSON configuration when persisting user credentials map to vault")
+        return fmt.Errorf("failed to generate JSON configuration persisting user credentials map to vault: %v", err)
     }
 
     if err := req.Storage.Put(ctx, entry); err != nil {
-        return fmt.Errorf("failed to persist user in persistent storage: %v", err)
+        b.Logger().Info("failed to persist user credentials map in persistent storage")
+        return fmt.Errorf("failed to persist user credentials map in persistent storage: %v", err)
     }
 
+    b.Logger().Info("Vault persistent storage updated successfully!")
+
     return nil
+}
+
+func (b *minioBackend) isUserCredentialExpired(creds UserInfo, maxTtl time.Duration, now time.Time) bool {
+    elapsed := now.Sub(creds.CreationTime)
+    return elapsed >= maxTtl
+}
+
+// Setter function only for unit tests
+func (b *minioBackend) SetuserCredsMap(newMap map[string][]UserInfo) {
+    b.userCredsMap = newMap
 }

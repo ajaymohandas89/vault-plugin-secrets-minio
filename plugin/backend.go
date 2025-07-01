@@ -3,6 +3,7 @@ package minio
 import (
     "context"
     "errors"
+    "fmt"
     "strings"
     "sync"
 
@@ -10,6 +11,7 @@ import (
     "github.com/hashicorp/vault/sdk/logical"
 
     "github.com/minio/madmin-go/v3"
+    "github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 type minioBackend struct {
@@ -18,6 +20,10 @@ type minioBackend struct {
     client *madmin.AdminClient
 
     clientMutex sync.RWMutex
+
+    userCredsMap map[string][]UserInfo
+
+    userCredsMapMutex sync.RWMutex
 }
 
 // Factory returns a configured instance of the minio backend
@@ -27,8 +33,36 @@ func Factory(ctx context.Context, c *logical.BackendConfig) (logical.Backend, er
     return nil, err
     }
 
+    // Load user credentials map from vault persistent storage
+    b.Logger().Info("Retrieving user static credentials from vault persistent storage")
+    if err := b.loadUserStaticCredentialsFromVault(ctx, c.StorageView) ; err != nil {
+        b.Logger().Error("failed to get user entry map from persistent storage!", err)
+        return nil, err
+    }
+
     b.Logger().Info("Plugin successfully initialized")
     return b, nil
+}
+
+func (b *minioBackend) loadUserStaticCredentialsFromVault(ctx context.Context, storage logical.Storage) error {
+    entry, err := storage.Get(ctx, userStoragePath)
+    if err != nil {
+        return fmt.Errorf("failed to get user credentials map from persistent storage: %v", err)
+    }
+    
+    b.userCredsMapMutex.Lock()
+    defer b.userCredsMapMutex.Unlock()
+
+    if entry == nil {
+        //Initialize the user credentials map if its being accessed for the first time
+        b.userCredsMap = make(map[string][]UserInfo)
+        return nil
+    }
+
+    if err := entry.DecodeJSON(&b.userCredsMap); err != nil {
+        return fmt.Errorf("failed to decode user credentials map %v", err)
+    }
+    return nil
 }
 
 // Backend returns a configured minio backend
@@ -90,7 +124,7 @@ func (b *minioBackend) getMadminClient(ctx context.Context, s logical.Storage) (
     }
 
     if c.Endpoint == "" {
-        err = errors.New("Endpoint not set when trying to create new madmin client")
+        err = errors.New("endpoint not set when trying to create new madmin client")
         b.Logger().Error("Error", "error", err)
         return nil, err
     }
@@ -107,7 +141,12 @@ func (b *minioBackend) getMadminClient(ctx context.Context, s logical.Storage) (
         return nil, err
     }
 
-    client, err := madmin.New(c.Endpoint, c.AccessKeyId, c.SecretAccessKey, c.UseSSL)
+    creds := credentials.NewStaticV4(c.AccessKeyId, c.SecretAccessKey, "")
+    opts := &madmin.Options{
+        Creds: creds,
+        Secure: true,
+    }
+    client, err := madmin.NewWithOptions(c.Endpoint, opts)
     if err != nil {
         b.Logger().Error("Error getting new madmin client", "error", err)
         return nil, err
@@ -128,5 +167,5 @@ func (b *minioBackend) invalidateMadminClient() {
 }
 
 const minioHelp = `
-The minio secret backend returns dynamic STS credentials to access data on Minio server.
+Backend that returns secret credentials for clients using MinIO.
 `

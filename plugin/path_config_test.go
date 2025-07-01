@@ -42,7 +42,7 @@ func TestConfigSuccess(t *testing.T) {
         // Updating the config
         err = testConfigCreateOrUpdate(t, reqStorage, map[string]interface{}{
             "endpoint":        TEST_APP_OSS_ENDPOINT,
-            "accessKeyId":     "new-access-kye-id",
+            "accessKeyId":     "new-access-key-id",
             "secretAccessKey": "new-secret-access-key",
             "useSSL":          TEST_OSS_ENDPOINT_USE_SSL,
         })
@@ -51,7 +51,7 @@ func TestConfigSuccess(t *testing.T) {
 
         err = testConfigRead(t, reqStorage, map[string]interface{}{
             "endpoint":        TEST_APP_OSS_ENDPOINT,
-            "accessKeyId":     "new-access-kye-id",
+            "accessKeyId":     "new-access-key-id",
             "secretAccessKey": "new-secret-access-key",
             "useSSL":          TEST_OSS_ENDPOINT_USE_SSL,
         })
@@ -71,7 +71,7 @@ func TestConfigReadError(t *testing.T) {
     t.Run("Test Plugin Configuration Reading Empty Configuration", func(t *testing.T) {
         err := testConfigRead(t, reqStorage, map[string]interface{}{
             "endpoint":        TEST_APP_OSS_ENDPOINT,
-            "accessKeyId":     "new-access-kye-id",
+            "accessKeyId":     "new-access-key-id",
             "secretAccessKey": "new-secret-access-key",
             "useSSL":          TEST_OSS_ENDPOINT_USE_SSL,
         })

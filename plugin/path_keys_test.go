@@ -1,15 +1,15 @@
 package minio_test
 
 import (
-	"context"
-	"math/rand"
-	"testing"
-	"time"
+    "context"
+    "math/rand"
+    "testing"
+    "time"
 
-	minio "github.com/ajaymohandas89/vault-plugin-secrets-minio/plugin"
-	"github.com/hashicorp/vault/sdk/logical"
-	"github.com/minio/madmin-go/v3"
-	"github.com/stretchr/testify/require"
+    "github.com/hashicorp/vault/sdk/logical"
+    "github.com/minio/madmin-go/v3"
+    "github.com/stretchr/testify/require"
+    minio "github.com/ajaymohandas89/vault-plugin-secrets-minio/plugin"
 )
 
 const (
@@ -22,7 +22,13 @@ func TestPluginPathKeysCreateError(t *testing.T) {
     reqStorage := new(logical.InmemStorage)
 
     t.Run("Test Path Keys Api Generate Static Credentials Error When Role Not Found", func(t *testing.T) {
-        resp, err := testPathKeysCreateStaticCredentials(t, reqStorage, TEST_ROLE_NAME)
+        minioBackend := minio.Backend()
+        resp, err := minioBackend.HandleRequest(context.Background(), &logical.Request{
+            ID:        generateRandomString(),
+            Operation: logical.ReadOperation,
+            Path:      "creds/" + TEST_ROLE_NAME,
+            Storage:   reqStorage,
+        })
         require.Error(t, err)
         require.Nil(t, resp)
     })
@@ -36,7 +42,13 @@ func TestPluginPathKeysCreateError(t *testing.T) {
         })
         require.NoError(t, err)
 
-        resp, err := testPathKeysCreateStaticCredentials(t, reqStorage, TEST_ROLE_NAME)
+        minioBackend := minio.Backend()
+        resp, err := minioBackend.HandleRequest(context.Background(), &logical.Request{
+            ID:        generateRandomString(),
+            Operation: logical.ReadOperation,
+            Path:      "creds/" + TEST_ROLE_NAME,
+            Storage:   reqStorage,
+        })
         require.Error(t, err)
         require.Nil(t, resp)
     })
@@ -66,7 +78,7 @@ func TestPluginPathKeysRevokeError(t *testing.T) {
             SecretAccessKey: "secretAccessKey",
             PolicyName:      "policy",
             Status:          madmin.AccountEnabled,
-            ExpirationDate:  time.Now(),
+            CreationTime:    time.Now(),
         }
 
         var userMap = make(map[string]minio.UserInfo)
@@ -78,17 +90,6 @@ func TestPluginPathKeysRevokeError(t *testing.T) {
         resp, err := testPathKeysRevoke(t, reqStorage, TEST_ROLE_NAME)
         require.Error(t, err)
         require.Nil(t, resp)
-    })
-}
-
-func testPathKeysCreateStaticCredentials(t *testing.T, s logical.Storage, roleName string) (*logical.Response, error) {
-    t.Helper()
-    b, _ := getMinioBackend(t)
-    return b.HandleRequest(context.Background(), &logical.Request{
-        ID:        generateRandomString(),
-        Operation: logical.ReadOperation,
-        Path:      "creds/" + roleName,
-        Storage:   s,
     })
 }
 

@@ -40,7 +40,7 @@ type Role struct {
     MaxStsTTL time.Duration `json:"max_sts_ttl"`
 
     // MaxTTL is the maximum TTL for static credential to exist after which new ones are created
-    MaxTTL time.Duration `json:"max_ttl"`
+    MaxTTL string `json:"max_ttl"`
     
 }
 
@@ -60,9 +60,11 @@ func (b *minioBackend) pathRoles() *framework.Path {
 
 // pathRolesList lists the currently defined roles
 func (b *minioBackend) pathRolesList(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
+    b.Logger().Info("Listing all roles stored in vault!")
     roles, err := b.ListRoles(ctx, req.Storage)
 
     if err != nil {
+        b.Logger().Error("failed to list roles!", err)
         return nil, err
     }
 
@@ -72,7 +74,7 @@ func (b *minioBackend) pathRolesList(ctx context.Context, req *logical.Request, 
 // Define the CRUD functions for the roles path
 func (b *minioBackend) pathRolesCRUD() *framework.Path {
     return &framework.Path{
-    Pattern: fmt.Sprintf("roles/" + framework.GenericNameRegex("role")),
+    Pattern: "roles/" + framework.GenericNameRegex("role"),
     HelpSynopsis: "Configure a Minio user role.",
     HelpDescription: "Use this endpoint to set the police for generated user in this role.",
 
@@ -103,8 +105,8 @@ func (b *minioBackend) pathRolesCRUD() *framework.Path {
         Description: "Maximum TTL applied to sts token keys.",
         },
         "max_ttl": &framework.FieldSchema{
-        Type: framework.TypeDurationSecond,
-        Default: "30d",
+        Type: framework.TypeString,
+        Default: "720h",
         Description: "Maximum TTL applied to static credential.",
         },
     },
@@ -141,13 +143,14 @@ func (b *minioBackend) pathRoleExistsCheck(ctx context.Context, req *logical.Req
 // pathRoleRead reads information on a current role
 func (b *minioBackend) pathRoleRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
     role := d.Get("role").(string)
-
+    b.Logger().Info("Retrieving role " + role + " details stored in vault!")
     r, err := b.GetRole(ctx, req.Storage, role)
 
     if err != nil {
         if err == ErrRoleNotFound {
             return logical.ErrorResponse(err.Error()), logical.ErrInvalidRequest
         }
+        b.Logger().Error("failed to get role details", err)
         return nil, err
     }
     var role_data map[string]interface{}
@@ -156,7 +159,7 @@ func (b *minioBackend) pathRoleRead(ctx context.Context, req *logical.Request, d
         role_data = map[string]interface{}{
             "user_name_prefix": r.UserNamePrefix,
             "policy_name": r.PolicyName,
-            "max_ttl": r.MaxTTL.Seconds(),
+            "max_ttl": r.MaxTTL,
             "credential_type": r.CredentialType,
         }
     } else if r.CredentialType == StsCredentialType {
@@ -176,7 +179,7 @@ func (b *minioBackend) pathRoleRead(ctx context.Context, req *logical.Request, d
 // pathRoleWrite creates/updates a role entry
 func (b *minioBackend) pathRoleWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
     role := d.Get("role").(string)
-
+    b.Logger().Info("Writing role " + role + " in vault!")
     var r Role
 
     keys := []string{"user_name_prefix", "policy_name", "credential_type", "policy_document"}
@@ -196,15 +199,17 @@ func (b *minioBackend) pathRoleWrite(ctx context.Context, req *logical.Request, 
         }
     }
 
-    r.MaxTTL = time.Duration(d.GetDefaultOrZero("max_ttl").(int)) * time.Second
+    r.MaxTTL = d.Get("max_ttl").(string)
     r.MaxStsTTL = time.Duration(d.Get("max_sts_ttl").(int)) * time.Second
     
     entry, err := logical.StorageEntryJSON("roles/"+role, &r)
     if err != nil {
+        b.Logger().Error("failed to create storage entry when updating role!", err)
         return nil, fmt.Errorf("failed to create storage entry: %v", err)
     }
 
     if err := req.Storage.Put(ctx, entry); err != nil {
+        b.Logger().Error("failed to write entry to storage when updating role!", err)
         return nil, fmt.Errorf("failed to write entry to storage: %v", err)
     }
 
@@ -213,19 +218,22 @@ func (b *minioBackend) pathRoleWrite(ctx context.Context, req *logical.Request, 
 
 // pathRoleDelete deletes a role
 func (b *minioBackend) pathRoleDelete(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+    b.Logger().Info("Deleting role from in vault!")
     roleName := d.Get("role").(string)
     r, err := b.GetRole(ctx, req.Storage, roleName)
     if err != nil {
+        b.Logger().Error("error in getting role", err)
         return nil, err
     }
-
+    b.Logger().Info("Removing all credentials from vault and minio for " + roleName)
     err = b.removeAllUser(ctx, req, r, roleName)
-
     if err != nil {
+        b.Logger().Error("failed to remove all user credentials when deleting role", err)
         return nil, err
     }
 
     if err = req.Storage.Delete(ctx, "roles/"+roleName); err != nil {
+        b.Logger().Error("failed to delete role from storage!", err)
         return nil, fmt.Errorf("failed to delete role from storage: %v", err)
     }
     
@@ -235,6 +243,7 @@ func (b *minioBackend) pathRoleDelete(ctx context.Context, req *logical.Request,
 func (b* minioBackend) ListRoles(ctx context.Context, s logical.Storage) ([]string, error) {
     roles, err := s.List(ctx, "roles/")
     if err != nil {
+        b.Logger().Error("unable to retrieve list of roles!", err)
         return nil, fmt.Errorf("unable to retrieve list of roles: %v", err)
     }
 
@@ -243,7 +252,8 @@ func (b* minioBackend) ListRoles(ctx context.Context, s logical.Storage) ([]stri
 func (b* minioBackend) GetRole(ctx context.Context, s logical.Storage, role string) (*Role, error) {
     r, err := s.Get(ctx, "roles/"+role)
     if err != nil { 
-        return nil, fmt.Errorf("unable to retrieve role %v: %v", role, err)
+        b.Logger().Error("unable to retrieve role", err)
+        return nil, fmt.Errorf("unable to retrieve role %v %v", role, err)
     }
 
     if r == nil {
@@ -252,6 +262,7 @@ func (b* minioBackend) GetRole(ctx context.Context, s logical.Storage, role stri
 
     var rv Role
     if err := r.DecodeJSON(&rv); err != nil {
+        b.Logger().Error("unable to decode role!", err)
         return nil, fmt.Errorf("unable to decode role %v: %v", role, err)
     }
 

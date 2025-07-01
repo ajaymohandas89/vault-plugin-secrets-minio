@@ -1,24 +1,23 @@
 package minio_test
 
 import (
-	"context"
-	"fmt"
-	"strconv"
-	"testing"
+    "context"
+    "strconv"
+    "testing"
 
-	"github.com/hashicorp/vault/sdk/logical"
-	"github.com/minio/madmin-go/v3"
-	"github.com/stretchr/testify/require"
-	minio "github.com/ajaymohandas89/vault-plugin-secrets-minio/plugin"
+    "github.com/hashicorp/vault/sdk/logical"
+    "github.com/minio/madmin-go/v3"
+    "github.com/stretchr/testify/require"
+    minio "github.com/ajaymohandas89/vault-plugin-secrets-minio/plugin"
 )
 
 const (
     TEST_ROLE_NAME              = "il-fund"
     TEST_USERNAME_PREFIX        = "test-user-name-prefix"
-    TEST_POLICY_NAME            = "dev-us03-investor-vision"
+    TEST_POLICY_NAME            = "dev-us03-investor-vision,int-us03-inview"
     TEST_POLICY_DOCUMENT        = "{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": [\n   {\n    \"Effect\": \"Allow\",\n    \"Action\": [\n     \"s3:GetBucketLocation\",\n     \"s3:GetObject\"\n    ],\n    \"Resource\": [\n     \"arn:aws:s3:::*\"\n    ]\n   }\n  ]\n }"
     TEST_MAX_STS_TTL            = 100
-    TEST_MAX_TTL                = "30d"
+    TEST_MAX_TTL                = "720h"
     TEST_STATIC_CREDENTIAL_TYPE = "static"
     TEST_STS_CREDENTIAL_TYPE    = "sts"
 )
@@ -27,7 +26,15 @@ func TestPluginRoleSuccess(t *testing.T) {
     reqStorage := new(logical.InmemStorage)
 
     t.Run("Test Role Apis for static credential type With No Error", func(t *testing.T) {
-        _, err := testRoleCreateOrUpdate(t, reqStorage, TEST_ROLE_NAME, map[string]interface{}{
+        err := testConfigCreateOrUpdate(t, reqStorage, map[string]interface{}{
+            "endpoint":        TEST_APP_OSS_ENDPOINT,
+            "accessKeyId":     TEST_APP_OSS_ACCESS_KEY_ID,
+            "secretAccessKey": TEST_APP_OSS_SECRET_ACCESS_KEY,
+            "useSSL":          TEST_OSS_ENDPOINT_USE_SSL,
+        })
+        require.NoError(t, err)
+
+        _, err = testRoleCreateOrUpdate(t, reqStorage, TEST_ROLE_NAME, map[string]interface{}{
             "role":             TEST_ROLE_NAME,
             "user_name_prefix": TEST_USERNAME_PREFIX,
             "policy_name":      TEST_POLICY_NAME,
@@ -42,10 +49,7 @@ func TestPluginRoleSuccess(t *testing.T) {
         require.Equal(t, TEST_USERNAME_PREFIX, resp.Data["user_name_prefix"])
         require.Equal(t, TEST_POLICY_NAME, resp.Data["policy_name"])
         require.Equal(t, TEST_STATIC_CREDENTIAL_TYPE, resp.Data["credential_type"])
-
-        days := resp.Data["max_ttl"].(float64) / 86400
-        duration := fmt.Sprintf("%.0fd", days)
-        require.Equal(t, TEST_MAX_TTL, duration)
+		require.Equal(t, TEST_MAX_TTL, resp.Data["max_ttl"])
 
         // Updating Role details
         _, err = testRoleCreateOrUpdate(t, reqStorage, TEST_ROLE_NAME, map[string]interface{}{
@@ -65,10 +69,7 @@ func TestPluginRoleSuccess(t *testing.T) {
         require.Equal(t, "new_prefix", resp.Data["user_name_prefix"])
         require.Equal(t, TEST_POLICY_NAME, resp.Data["policy_name"])
         require.Equal(t, TEST_STATIC_CREDENTIAL_TYPE, resp.Data["credential_type"])
-
-        days = resp.Data["max_ttl"].(float64) / 86400
-        duration = fmt.Sprintf("%.0fd", days)
-        require.Equal(t, TEST_MAX_TTL, duration)
+		require.Equal(t, TEST_MAX_TTL, resp.Data["max_ttl"])
 
         _, err = testRoleDelete(t, reqStorage, TEST_ROLE_NAME)
         require.NoError(t, err)
@@ -229,8 +230,16 @@ func TestPluginRoleDelete(t *testing.T) {
     })
 
     t.Run("Test Role Delete Remove Static User Credential When STS is False", func(t *testing.T) {
+        
         s := &logical.InmemStorage{}
-        _, err := testRoleCreateOrUpdate(t, s, TEST_ROLE_NAME, map[string]interface{}{
+        err := testConfigCreateOrUpdate(t, s, map[string]interface{}{
+            "endpoint":        TEST_APP_OSS_ENDPOINT,
+            "accessKeyId":     TEST_APP_OSS_ACCESS_KEY_ID,
+            "secretAccessKey": TEST_APP_OSS_SECRET_ACCESS_KEY,
+            "useSSL":          TEST_OSS_ENDPOINT_USE_SSL,
+        })
+        require.NoError(t, err)
+        _, err = testRoleCreateOrUpdate(t, s, TEST_ROLE_NAME, map[string]interface{}{
             "role":             TEST_ROLE_NAME,
             "user_name_prefix": TEST_USERNAME_PREFIX,
             "policy_name":      TEST_POLICY_NAME,
@@ -263,7 +272,7 @@ func TestPluginRoleDelete(t *testing.T) {
 
         var userMap = make(map[string]minio.UserInfo)
         userMap[TEST_ROLE_NAME] = userInfo
-        entry, err := logical.StorageEntryJSON("users", userMap)
+        entry, _ := logical.StorageEntryJSON("users", userMap)
         s.Put(context.Background(), entry)
 
         s.Underlying().FailPut(true)
@@ -292,7 +301,7 @@ func TestPluginReadError(t *testing.T) {
         s := &logical.InmemStorage{}
         s.Underlying().FailGet(true)
         
-        resp, err := testRoleCreateOrUpdate(t, s, TEST_ROLE_NAME, map[string]interface{}{
+        _, err := testRoleCreateOrUpdate(t, s, TEST_ROLE_NAME, map[string]interface{}{
             "role":             TEST_ROLE_NAME,
             "user_name_prefix": TEST_USERNAME_PREFIX,
             "policy_name":      TEST_POLICY_NAME,
@@ -301,7 +310,7 @@ func TestPluginReadError(t *testing.T) {
         })
         require.NoError(t, err)
 
-        resp, err = testRoleRead(t, s, TEST_ROLE_NAME)
+        resp, err := testRoleRead(t, s, TEST_ROLE_NAME)
 
         require.Nil(t, resp)
         require.Error(t, err)
