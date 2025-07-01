@@ -12,9 +12,9 @@ import (
 )
 
 const (
-    TEST_ROLE_NAME              = "il-fund"
+    TEST_ROLE_NAME              = "test-role-name"
     TEST_USERNAME_PREFIX        = "test-user-name-prefix"
-    TEST_POLICY_NAME            = "dev-us03-investor-vision,int-us03-inview"
+    TEST_POLICY_NAME            = "test-policy-name"
     TEST_POLICY_DOCUMENT        = "{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": [\n   {\n    \"Effect\": \"Allow\",\n    \"Action\": [\n     \"s3:GetBucketLocation\",\n     \"s3:GetObject\"\n    ],\n    \"Resource\": [\n     \"arn:aws:s3:::*\"\n    ]\n   }\n  ]\n }"
     TEST_MAX_STS_TTL            = 100
     TEST_MAX_TTL                = "720h"
