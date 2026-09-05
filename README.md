@@ -43,7 +43,6 @@ policy which will be applied to the newly created user.
 
     vault write -namespace=<vault-namespace> <path>/roles/example-role \
         policy_name=<existing minio policy name>
-        policy_document=<policy in json format>
         credential_type=sts
         max_sts_ttl=time
 
