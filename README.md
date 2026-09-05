@@ -107,11 +107,11 @@ B) User Static Credential - Credentials are created with endpoint "/creds" and i
 
 Static Credentials with set expiry
 
-$ vault read -namespace=<vault-namespace> <path>/creds/example-role
+    $ vault read -namespace=<vault-namespace> <path>/creds/example-role
 
 Dynamic STS credentials
 
-$ vault write -namespace=<vault-namespace> <path>/sts/example-role ttl=1h policy_name=<minio-bucket-name>
+    $ vault write -namespace=<vault-namespace> <path>/sts/example-role ttl=1h policy_name=<minio-bucket-name>
 
 ## Building from CLI
 Run the build.sh script.
