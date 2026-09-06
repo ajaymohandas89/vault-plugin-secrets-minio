@@ -132,3 +132,5 @@ To view the coverage output in html format
 [Secrets Made Easy](https://blog.min.io/minio-and-hashicorp-vault/)
 
 [MinIO](https://min.io/)
+
+Forked from https://github.com/kula/vault-plugin-secrets-minio
