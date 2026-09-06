@@ -6,9 +6,9 @@ This is a secret engine plugin that combines [HashiCorp Vault](https://www.vault
 
 ### Configuration
 
-In order to configure the plugin instance, you must supply it with your Minio
-endpoint, root access key ID, and root secret access key for the Minio root
-user. 
+To configure this plugin, point it at your MinIO endpoint and provide the 
+root user's access key ID and secret access key. endpoint, root access key ID, 
+and root secret access key for the Minio root user. 
 
     vault write <path>/config/root
         -namespace=<vault-namespace>
@@ -27,7 +27,7 @@ You can delete the current configuration:
 
 ### Roles
 
-Before you can issue keys, you must define a role. A role defines the 
+You'll need to create a role before requesting any credentials. A role defines the 
 policy which will be applied to the newly created user.
 
     Static Credential Role
@@ -47,7 +47,7 @@ policy which will be applied to the newly created user.
         max_sts_ttl=time
 
 **_NOTE:_** 
-> `<user name prefix>` is prefixed to the Vault request id for a key request,
+> `<user name prefix>` gets prepended to the Vault request ID,
 and defaults to an empty string. Having the Vault request id as the 
 latter part of the name allows you to trace the key issuer via the Vault
 audit log. You may also optionally supply a `max_sts_ttl`
